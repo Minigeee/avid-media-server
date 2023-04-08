@@ -11,6 +11,7 @@ import {
 
 import config from './config';
 import { Participant, Room } from './rooms';
+import wrapper from './wrapper';
 
 type RtcTransportType = 'producer' | 'consumer';
 
@@ -43,19 +44,27 @@ export async function makeWebRtcTransport(room: Room, participant_id: string, ty
 		port: undefined,
 		webRtcServer: room.worker.appData.webRtcServer as WebRtcServer,
 	});
-	
-	// TODO : Logging
-	transport.on('sctpstatechange', (sctpState) => {
-		console.log('WebRtcTransport "sctpstatechange" event [sctpState:%s]', sctpState);
-		/* logger.debug('WebRtcTransport "sctpstatechange" event [sctpState:%s]', sctpState); */
-	});
 
-	transport.on('dtlsstatechange', (dtlsState) => {
-		if (dtlsState === 'failed' || dtlsState === 'closed')
-			console.log('WebRtcTransport "dtlsstatechange" event [dtlsState:%s]', dtlsState);
-		/* if (dtlsState === 'failed' || dtlsState === 'closed')
-			logger.warn('WebRtcTransport "dtlsstatechange" event [dtlsState:%s]', dtlsState); */
-	});
+	// Log state changes
+	transport.on('sctpstatechange', wrapper.event(room, participant_id, (sctpState) => {
+		room.log.debug(`WebRtcTransport event`, {
+			data: {
+				event: 'sctpstatechange',
+				sctpState
+			}
+		});
+	}));
+
+	transport.on('dtlsstatechange', wrapper.event(room, participant_id, (dtlsState) => {
+		if (dtlsState === 'failed' || dtlsState === 'closed') {
+			room.log.warn(`WebRtcTransport event`, {
+				data: {
+					type: 'dtlsstatechange',
+					dtlsState
+				}
+			});
+		}
+	}));
 
 	// Store transport
 	room.participants[participant_id].transports[transport.id] = transport;
@@ -78,20 +87,24 @@ export async function makeWebRtcTransport(room: Room, participant_id: string, ty
  * @param options The producer options
  * @returns A new producer object
  */
-export async function makeProducer(participant: Participant, transport: WebRtcTransport, options: ProducerOptions) {
+export async function makeProducer(room: Room, participant: Participant, transport: WebRtcTransport, options: ProducerOptions) {
 	const producer = await transport.produce(options);
 
 	// Attach producer listeners
-	producer.on('score', (score) => {
+	producer.on('score', wrapper.event(room, participant.id, (score) => {
 		// Send producer score
 		participant.socket.emit('producer-score', producer.id, score);
-	});
+	}));
 
-	producer.on('videoorientationchange', (videoOrientation) => {
-		/* TODO : logger.debug(
-			'producer "videoorientationchange" event [producerId:%s, videoOrientation:%o]',
-			producer.id, videoOrientation); */
-	});
+	producer.on('videoorientationchange', wrapper.event(room, participant.id, (videoOrientation) => {
+		room.log.debug('Producer event', {
+			data: {
+				event: 'videoorientationchange',
+				producer_id: producer.id,
+				videoOrientation,
+			}
+		});
+	}));
 
 	// NOTE: For testing.
 	// await producer.enableTraceEvent([ 'rtp', 'keyframe' ]);
@@ -146,54 +159,46 @@ export async function makeConsumer(options: {
 		return;
 
 	// Create the consumer in paused mode
-	let consumer: Consumer;
-	try {
-		consumer = await transport.consume({
-			producerId: producer.id,
-			rtpCapabilities: participant.consumer.capabilities.rtp,
-			paused: true,
-		});
-	}
-	catch (error) {
-		// TODO : Log Error
-		console.log('failed to create consumer');
-		return;
-	}
+	let consumer = await transport.consume({
+		producerId: producer.id,
+		rtpCapabilities: participant.consumer.capabilities.rtp,
+		paused: true,
+	});
 
 	// Add consumer to participant
 	participant.consumer.consumers[consumer.id] = consumer;
 
 
 	// Add consumer event handlers
-	consumer.on('transportclose', () => {
+	consumer.on('transportclose', wrapper.event(room, participant.consumer.id, () => {
 		// Remove from its map
 		delete participant.consumer.consumers[consumer.id];
-	});
+	}));
 
-	consumer.on('producerclose', () => {
+	consumer.on('producerclose', wrapper.event(room, participant.consumer.id, () => {
 		// Remove from its map
 		delete participant.consumer.consumers[consumer.id];
 
 		// Notify of consumer closing
 		participant.consumer.socket.emit('consumer-closed', consumer.id);
-	});
+	}));
 
-	consumer.on('producerpause', () => {
+	consumer.on('producerpause', wrapper.event(room, participant.consumer.id, () => {
 		// Notify of consumer pausing
 		participant.consumer.socket.emit('consumer-paused', consumer.id);
-	});
+	}));
 
-	consumer.on('producerresume', () => {
+	consumer.on('producerresume', wrapper.event(room, participant.consumer.id, () => {
 		// Notify of consumer resuming
 		participant.consumer.socket.emit('consumer-resumed', consumer.id);
-	});
+	}));
 
-	consumer.on('score', (score) => {
+	consumer.on('score', wrapper.event(room, participant.consumer.id, (score) => {
 		// Notify of consumer score
 		participant.consumer.socket.emit('consumer-score', consumer.id, score);
-	});
+	}));
 
-	consumer.on('layerschange', (layers) => {
+	consumer.on('layerschange', wrapper.event(room, participant.consumer.id, (layers) => {
 		// Notify num layers
 		participant.consumer.socket.emit(
 			'consumer-layers-changed',
@@ -201,7 +206,7 @@ export async function makeConsumer(options: {
 			layers?.spatialLayer || null,
 			layers?.temporalLayer || null
 		);
-	});
+	}));
 
 	// NOTE: For testing.
 	// await consumer.enableTraceEvent([ 'rtp', 'keyframe', 'nack', 'pli', 'fir' ]);
@@ -222,34 +227,28 @@ export async function makeConsumer(options: {
 		type: consumer.type,
 		appData: producer.appData,
 		producerPaused: consumer.producerPaused
-	}, async (success) => {
-		try {
-			if (!success)
-				throw new Error('failed to create client-side consumer');
+	}, wrapper.event(room, participant.consumer.id, async (success) => {
+		if (!success)
+			throw new Error('failed to create client-side consumer');
 
-			// Now that we got the positive response from the remote endpoint, resume
-			// the Consumer so the remote endpoint will receive the a first RTP packet
-			// of this new stream once its PeerConnection is already ready to process
-			// and associate it.
-			await consumer.resume();
+		// Now that we got the positive response from the remote endpoint, resume
+		// the Consumer so the remote endpoint will receive the a first RTP packet
+		// of this new stream once its PeerConnection is already ready to process
+		// and associate it.
+		await consumer.resume();
 
-			// Notify initial score
-			participant.consumer.socket.emit('consumer-score', consumer.id, consumer.score);
-		}
-		catch (err) {
-			// TODO : Logging
-			console.log(err);
-		}
-	});
+		// Notify initial score
+		participant.consumer.socket.emit('consumer-score', consumer.id, consumer.score);
+	}));
 }
 
 
-export async function makeAudioLevelObserver(router: Router, options: AudioLevelObserverOptions) {
+export async function makeAudioLevelObserver(room: Room, options: AudioLevelObserverOptions) {
 	// Create observer
-	const observer = await router.createAudioLevelObserver(options);
+	const observer = await room.router.createAudioLevelObserver(options);
 
 	// Attach event listeners
-	observer.on('volumes', (volumes) => {
+	observer.on('volumes', wrapper.event(room, null, (volumes) => {
 		const { producer, volume } = volumes[0];
 
 		console.log(`volume ${volume}`)
@@ -264,9 +263,9 @@ export async function makeAudioLevelObserver(router: Router, options: AudioLevel
 				})
 				.catch(() => { });
 		} */
-	});
+	}));
 
-	observer.on('silence', () => {
+	observer.on('silence', wrapper.event(room, null, () => {
 		console.log('silence');
 
 		// Notify all Peers.
@@ -274,7 +273,7 @@ export async function makeAudioLevelObserver(router: Router, options: AudioLevel
 			peer.notify('activeSpeaker', { peerId: null })
 				.catch(() => { });
 		} */
-	});
+	}));
 
 	return observer;
 }

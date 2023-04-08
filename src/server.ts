@@ -11,7 +11,9 @@ import { Server as SocketServer, Socket } from 'socket.io';
 
 import config from './config';
 import { redis } from './db';
+import { log } from './logs';
 import { addParticipant, getRoom } from './rooms';
+
 import { Media_ClientToServerEvents, Media_ServerToClientEvents, SessionUser } from 'avid-types';
 
 
@@ -145,8 +147,8 @@ async function makeSocketServer() {
         // Parse headers to get identity
         const user = await getSessionUser(socket.handshake.headers.cookie);
         if (!user || !user.data.profile?._id) {
-            // TODO : Error logging
-            console.log('Not authenticated');
+            log.warn('not authenticated');
+            socket.disconnect();
             return;
         }
 

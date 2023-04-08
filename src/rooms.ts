@@ -13,9 +13,13 @@ import {
 } from 'mediasoup/node/lib/types';
 
 import config from './config';
+import { Logger } from './logs';
 import { makeAudioLevelObserver, makeConsumer, makeProducer, makeWebRtcTransport } from './rtc';
 import { io } from './server';
 import { Socket } from './types';
+import wrapper from './wrapper';
+
+import assert from 'assert';
 
 /** Type representing an rtc participant */
 export type Participant = {
@@ -50,11 +54,13 @@ export type Room = {
 	worker: Worker;
 	/** The mediasoup router used to represent this room */
 	router: Router;
+	/** Room logger */
+	log: Logger;
 
 	/** RTC event observers */
 	observers: {
 		/** Observes audio levels from audio producers */
-		audio_level: AudioLevelObserver;
+		audio_level?: AudioLevelObserver;
 	};
 	/** A list of participants in the room */
 	participants: Record<string, Participant>;
@@ -102,26 +108,33 @@ export async function getRoom(room_id: string, workers: Worker[], loads: number[
 		// Make router
 		const router = await worker.createRouter({ mediaCodecs });
 
-		// Make observers
-		const audioLevelObserver = await makeAudioLevelObserver(router, {
-			maxEntries: 1,
-			threshold: -80,
-			interval: 800
-		});
-
 		// Create room
 		room = {
 			id: room_id,
 			worker,
 			router,
-			observers: {
-				audio_level: audioLevelObserver,
-			},
+			log: new Logger({}),
+			observers: {},
 			participants: {},
 		};
 
+		// Create room properties that depend on other properties
+		room.log = new Logger({ room });
+
+		// Make observers
+		const audioLevelObserver = await makeAudioLevelObserver(room, {
+			maxEntries: 1,
+			threshold: -80,
+			interval: 800
+		});
+
+		room.observers.audio_level = audioLevelObserver;
+
 		// Save room to map
 		_rooms[room_id] = room;
+
+		// Logging
+		room.log.info(`created new room`);
 	}
 
 	return room;
@@ -143,6 +156,9 @@ export async function closeRoom(room_id: string) {
 
 	// Close router
 	room.router.close();
+
+	// Logging
+	room.log.info(`closed room`);
 
 	// Remove room from map
 	delete _rooms[room_id];
@@ -206,10 +222,8 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 	}
 
 	// Called when the socket disconnects for any reason
-	socket.on('disconnect', (reason) => {
+	socket.on('disconnect', wrapper.event(room, participant_id, (reason) => {
 		const participant = room.participants[participant_id];
-
-		// TODO : Logging
 
 		// Notify all other peers
 		if (participant.joined)
@@ -222,27 +236,28 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Remove participant from list
 		delete room.participants[participant_id];
 
+		// Logging
+		room.log.info(`participant left`, { data: { participant_id } });
+
 		// If this is the latest Peer in the room, close the room.
 		if (Object.values(room.participants).length === 0) {
-			/* TODO : logger.info(
-				'last Peer in the room left, closing the room [roomId:%s]',
-				this._roomId); */
+			room.log.info('last participent left, closing room');
 
 			closeRoom(room.id);
 		}
-	});
+	}));
 
 	// Called when client creates client-side device and transports. The capabilities
 	// are saved so server can connect producer -> consumer correctly and deny any invalid
 	// connections, based on each client's capabilities. By the end of this function, the client
 	// is fully joined, and a consumer is created for each producer within the room.
-	socket.on('config', (device, rtpCapabilities, sctpCapabilities) => {
+	socket.on('config', wrapper.event(room, participant_id, (device, rtpCapabilities: RtpCapabilities, sctpCapabilities: SctpCapabilities) => {
 		const participant = room.participants[participant_id];
 
 		// Save client config
 		participant.device = device;
-		participant.capabilities.rtp = rtpCapabilities as RtpCapabilities;
-		participant.capabilities.sctp = sctpCapabilities as SctpCapabilities;
+		participant.capabilities.rtp = rtpCapabilities;
+		participant.capabilities.sctp = sctpCapabilities;
 
 		// Mark client as joined and ready
 		participant.joined = true;
@@ -250,12 +265,13 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Acknowledge that client is joined
 		socket.emit('joined');
 
+		// Logging
+		room.log.info(`participant successfully joined`, { data: { participant_id } });
+
 		// Create consumers for newly joined client for all other producer clients
 		const joined = getJoinedParticipants(room, participant_id);
 		const transport = Object.values(participant.transports).find(t => t.appData.type === 'consumer');
-		if (!transport)
-			// TODO : Error logging
-			throw new Error('could not find consumer transport');
+		assert(transport, 'could not find a consumer transport');
 
 		// Iterate all joined participants
 		for (const peer of joined) {
@@ -277,40 +293,40 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 		// Notify all other clients of the newly joined client
 		io().to(room.id).emit('participant-joined', participant_id, device);
-	});
+	}));
 
 	// Called whenever a transport is used for the first time. It connects the server-side
 	// transport to the client-side tranport so data can start flowing.
-	socket.on('connect-transport', async (transport_id, dtlsParameters) => {
+	socket.on('connect-transport', wrapper.event(room, participant_id, async (transport_id: string, dtlsParameters: DtlsParameters) => {
 		const participant = room.participants[participant_id];
 		const transport = participant.transports[transport_id];
+		assert(transport, 'transport does not exist');
 
-		if (!transport)
-			// TODO : Error logging
-			console.log('transport does not exist');
+		await transport.connect({ dtlsParameters: dtlsParameters });
 
-		await transport.connect({ dtlsParameters: dtlsParameters as DtlsParameters });
-	});
+		// Logging
+		room.log.verbose('new transport connected', { data: { participant_id, transport_id: transport.id } });
+	}));
 
 	// Called when client starts producing. It creates the server-side producer and returns
 	// the producer id so that the client can complete creating the client-side producer
-	socket.on('produce', async (transport_id, { kind, rtpParameters, appData }, callback) => {
+	socket.on('produce', wrapper.event(room, participant_id, async (
+		transport_id: string,
+		{ kind, rtpParameters, appData },
+		callback: (producer_id: string) => void
+	) => {
 		const participant = room.participants[participant_id];
-		if (!participant.joined)
-			// TODO : Error logging
-			console.log('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Get transport
 		const transport = participant.transports[transport_id];
-		if (!transport)
-			// TODO : Error logging
-			console.log('transport does not exist');
+		assert(transport, 'transport does not exist');
 
 		// Add participant id to app data
 		appData = { ...appData, participant_id };
 
 		// Create producer
-		const producer = await makeProducer(participant, transport, {
+		const producer = await makeProducer(room, participant, transport, {
 			kind: kind as MediaKind,
 			rtpParameters: rtpParameters as RtpParameters,
 			appData,
@@ -340,112 +356,108 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		}
 
 		// TODO : Add producer to observers
-		if (producer.kind === 'audio') {
+		if (room.observers.audio_level && producer.kind === 'audio') {
 			room.observers.audio_level.addProducer({ producerId: producer.id }).catch(console.log);
 		}
-	});
+
+		// Logging
+		room.log.verbose('new producer created', { data: { participant_id, transport_id, producer_id: producer.id } });
+	}));
 
 
 	// Consumer Events
 
 	// Called when a consumer pauses on client-side
-	socket.on('consumers-paused', async (consumer_ids) => {
+	socket.on('consumers-paused', wrapper.event(room, participant_id, async (consumer_ids: string[]) => {
 		const participant = room.participants[participant_id];
-
-		// Ensure participant is joined
-		if (!participant.joined)
-			throw new Error('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Loop and pause all consumers
 		for (const id of consumer_ids) {
 			// Get consumer
 			const consumer = participant.consumers[id];
-			if (!consumer)
-				// TODO : Logging
-				console.log(`consumer with id "${id}" does not exist`);
+			assert(consumer, `consumer with id "${id}" does not exist`);
 	
 			// Pause consumer
 			consumer.pause();
 		}
-	});
+
+		// Logging
+		room.log.verbose('participant deafened', { data: { participant_id } });
+	}));
 
 	// Called when a consumer pauses on client-side
-	socket.on('consumers-resumed', async (consumer_ids) => {
+	socket.on('consumers-resumed', wrapper.event(room, participant_id, async (consumer_ids: string[]) => {
 		const participant = room.participants[participant_id];
-
-		// Ensure participant is joined
-		if (!participant.joined)
-			throw new Error('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Loop and resume all consumers
 		for (const id of consumer_ids) {
 			// Get consumer
 			const consumer = participant.consumers[id];
-			if (!consumer)
-				// TODO : Logging
-				console.log(`consumer with id "${id}" does not exist`);
+			assert(consumer, `consumer with id "${id}" does not exist`);
 	
 			// Resume consumer
 			consumer.resume();
 		}
-	});
+		
+		// Logging
+		room.log.verbose('participant undeafened', { data: { participant_id } });
+	}));
 
 
 	// Producer Events
 
 	// Called when a producer closes on client-side
-	socket.on('producer-closed', (producer_id) => {
+	socket.on('producer-closed', wrapper.event(room, participant_id, (producer_id: string) => {
 		const participant = room.participants[participant_id];
-
-		// Ensure participant is joined
-		if (!participant.joined)
-			throw new Error('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Get producer
 		const producer = participant.producers[producer_id];
-		if (!producer)
-			throw new Error(`producer with id "${producer_id}" does not exist`);
+		assert(producer, `producer with id "${producer_id}" does not exist`);
 
 		// Close producer
 		producer.close();
 
 		// Remove from producer map
 		delete participant.producers[producer_id];
-	});
+
+		// Logging
+		room.log.verbose('producer closed', { data: { participant_id, producer_id } });
+	}));
 
 	// Called when a producer pauses on client-side
-	socket.on('producer-paused', async (producer_id) => {
+	socket.on('producer-paused', wrapper.event(room, participant_id, async (producer_id: string) => {
 		const participant = room.participants[participant_id];
-
-		// Ensure participant is joined
-		if (!participant.joined)
-			throw new Error('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Get producer
 		const producer = participant.producers[producer_id];
-		if (!producer)
-			throw new Error(`producer with id "${producer_id}" does not exist`);
+		assert(producer, `producer with id "${producer_id}" does not exist`);
 
 		// Pause producer
 		await producer.pause();
-	});
+
+		// Logging
+		room.log.verbose('producer paused/muted', { data: { participant_id, producer_id } });
+	}));
 
 	// Called when a producer resumes on client-side
-	socket.on('producer-resumed', async (producer_id) => {
+	socket.on('producer-resumed', wrapper.event(room, participant_id, async (producer_id: string) => {
 		const participant = room.participants[participant_id];
-
-		// Ensure participant is joined
-		if (!participant.joined)
-			throw new Error('participant is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
 
 		// Get producer
 		const producer = participant.producers[producer_id];
-		if (!producer)
-			throw new Error(`producer with id "${producer_id}" does not exist`);
+		assert(producer, `producer with id "${producer_id}" does not exist`);
 
 		// Resume producer
 		await producer.resume();
-	});
+
+		// Logging
+		room.log.verbose('producer resumed/unmuted', { data: { participant_id, producer_id } });
+	}));
 
 
 	// Emit configuration data (the router's rtp capabilities and the parameters for creating
@@ -453,6 +465,9 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 	// rtc device and to create client-side transports. They should then send back their own device
 	// configuration and rtp/sctp capabilities.
 	socket.emit('config', room.router.rtpCapabilities, producerConfig, consumerConfig);
+	
+	// Logging
+	room.log.info(`new participant joining`, { data: { participant_id } });
 }
 
 

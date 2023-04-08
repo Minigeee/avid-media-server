@@ -6,16 +6,51 @@ import {
     WorkerSettings,
 } from 'mediasoup/node/lib/types';
 
+const dev_mode = process.env.NODE_ENV === 'development';
+
 
 const config = {
+    dev_mode,
+
     sid_field: 'connect.sid',
-    domains: process.env.NODE_ENV === 'development' ? {
+    domains: dev_mode ? {
         api: 'http://localhost:3001',
         site: 'http://localhost:3000',
     } : {
         api: '',
         site: '',
     },
+    
+	/** Logger configuration */
+	logger: {
+		/** Mode the logger should operate under */
+		mode: dev_mode ? 'local' : 'remote',
+		/** Indicates if log files are enabled */
+		log_file: !dev_mode,
+		/** The log levels at or above which log entry ids should be assigned */
+		id_level: 2, // "info"
+		/** The log levels at or above which should be saved to remote database */
+		remote_level: 0, // "error"
+
+		/** Discord webhook used for error notifications */
+		discord_webhook: process.env.DISCORD_WEBHOOK,
+		/** Discord role id that should be pinged on new error */
+		discord_role_id: '',
+	},
+
+	/** Database configurations */
+	db: {
+		/** Mongo configurations */
+		mongo: {
+			/** Connection url */
+			url: process.env.MONGODB_CONNECTION_URL,
+		},
+		/** Redis configurations */
+		redis: {
+			/** Connection url */
+			url: process.env.REDIS_CONNECTION_URL,
+		},
+	},
 
     mediasoup:
     {
