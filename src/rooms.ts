@@ -337,8 +337,8 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		callback(producer.id);
 
 		// Create a consumer for each joined peer
-		// TODO : for (const peer of getJoinedParticipants(room, participant_id)) {
-		for (const peer of getJoinedParticipants(room)) {
+		for (const peer of getJoinedParticipants(room, participant_id)) {
+		// for (const peer of getJoinedParticipants(room)) {
 			// Find consumer peer's consumer transport
 			const consumerTransport = Object.values(peer.transports).find(t => t.appData.type === 'consumer');
 			if (!consumerTransport) continue;
