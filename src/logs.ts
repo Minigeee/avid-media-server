@@ -7,10 +7,9 @@ import { v4 as uuid } from 'uuid';
 import { Request, Response, NextFunction } from 'express';
 
 import config from './config';
-import { Logs } from './db';
 import { Participant, Room } from './rooms';
 
-import { LogEntry } from 'avid-types';
+import { LogEntry } from './types';
 
 
 ////////////////////////////////////////////////////////////
@@ -137,7 +136,7 @@ export class Logger {
     ////////////////////////////////////////////////////////////
     _logRemote(log: LogEntry) {
         // Insert log into database
-        Logs().insertOne(log).then(results => {
+        /* TODO : Logs().insertOne(log).then(results => {
             // Send discord update for errors
             if (config.logger.discord_webhook && log.level === 0) {
                 // Format date
@@ -167,7 +166,7 @@ export class Logger {
                     }],
                 });
             }
-        });
+        }); */
     }
 
     ////////////////////////////////////////////////////////////

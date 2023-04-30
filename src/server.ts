@@ -8,13 +8,14 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import * as mediasoup from 'mediasoup';
 import { WebRtcServerOptions, Worker } from 'mediasoup/node/lib/types';
 import { Server as SocketServer, Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
 
 import config from './config';
-import { redis } from './db';
 import { log } from './logs';
 import { addParticipant, getRoom } from './rooms';
 
-import { Media_ClientToServerEvents, Media_ServerToClientEvents, SessionUser } from 'avid-types';
+import { Media_ClientToServerEvents, Media_ServerToClientEvents } from '@app/types';
+import { getJwtPublic } from './keys';
 
 
 const _workers: Worker[] = [];
@@ -99,37 +100,18 @@ async function makeExpressServer() {
 
 
 ///////////////////////////////////////////////////////////
-async function getSessionUser(cookie?: string): Promise<SessionUser | undefined> {
-    if (!cookie) return;
+function getSessionUser(token?: string) {
+    if (!token) return;
 
-    // Create cookie map
-    const cookies: Record<string, string> = {};
-    for (const entry of cookie.split(';')) {
-        const [key, value] = entry.trim().split('=');
-        cookies[key] = value;
+    try {
+        const payload = jwt.verify(token, getJwtPublic());
+        return payload as { profile_id: string; };
     }
-
-    // Find sid
-    let sid = cookies[config.sid_field];
-    if (!sid) return;
-
-    // Parse session string
-    sid = decodeURIComponent(sid).split(':')[1].split('.')[0];
-
-    // Get session
-    const session = await redis.json.get('s' + sid).then((result: any) => {
-        return {
-            ...result,
-            cookie: {
-                ...result.cookie,
-                _expires: new Date(result.cookie._expires),
-            },
-        };
-    });
-
-    // Return user
-    return session.passport.user;
+    catch (error) {
+        return;
+    }
 }
+
 
 ///////////////////////////////////////////////////////////
 async function makeSocketServer() {
@@ -145,15 +127,16 @@ async function makeSocketServer() {
 	// Handle client connect
 	_socketServer.on('connection', async (socket) => {
         // Parse headers to get identity
-        const user = await getSessionUser(socket.handshake.headers.cookie);
-        if (!user || !user.data.profile?._id) {
+        const user = getSessionUser(socket.handshake.auth.token);
+        if (!user?.profile_id) {
             log.warn('not authenticated');
+            socket.emit('error', 'not authenticated', 401);
             socket.disconnect();
             return;
         }
 
         // Get ids
-        const profile_id = user.data.profile._id;
+        const profile_id = user.profile_id;
         const room_id = socket.handshake.query.room_id as string;
 
         // TODO : Check if user has permissions
