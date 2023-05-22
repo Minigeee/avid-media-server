@@ -17,8 +17,8 @@ const config = {
         api: 'http://localhost:3001',
         site: 'http://localhost:3000',
     } : {
-        api: '',
-        site: '',
+        api: 'https://api.avidapp.io',
+        site: 'https://avidapp.io',
     },
     
 	/** Logger configuration */
@@ -38,25 +38,30 @@ const config = {
 		discord_role_id: '',
 	},
 
-	/** Database configurations */
+	/** Database config */
 	db: {
-		/** Mongo configurations */
-		mongo: {
-			/** Connection url */
-			url: process.env.MONGODB_CONNECTION_URL,
-		},
-		/** Redis configurations */
-		redis: {
-			/** Connection url */
-			url: process.env.REDIS_CONNECTION_URL,
-		},
+		/** Database url */
+		url: dev_mode ? 'http://127.0.0.1:8000/sql' : 'https://db.avidapp.io/sql',
+		/** Default namespace */
+		namespace: dev_mode ? 'test' : 'main',
+		/** Default databse */
+		database: dev_mode ? 'test' : 'main',
+		/** Default token */
+		token: dev_mode ? 'main' : 'client',
+
+        /** Authentication username */
+        username: dev_mode ? 'root' : 'server',
+        /** Authentication password */
+        password: dev_mode ? 'root' : process.env.SURREAL_PASSWORD,
+
+        /** The default amount of time (in seconds) data retrieved from the database can be cached */
+        cache_lifetime: 1 * 60,
 	},
 
     mediasoup:
     {
         // Number of mediasoup workers to launch.
-        // numWorkers: Object.keys(os.cpus()).length,
-        numWorkers: 2,
+        numWorkers: dev_mode ? 2 : Object.keys(os.cpus()).length,
 
         // cpu load update interval
         loadUpdateInterval: 60 * 1000,

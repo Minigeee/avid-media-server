@@ -251,7 +251,7 @@ export async function makeAudioLevelObserver(room: Room, options: AudioLevelObse
 	observer.on('volumes', wrapper.event(room, null, (volumes) => {
 		const { producer, volume } = volumes[0];
 
-		console.log(`volume ${volume}`)
+		// console.log(`volume ${volume}`)
 
 		// Notify all Peers.
 		/* TODO : for (const peer of this._getJoinedPeers()) {
@@ -266,7 +266,7 @@ export async function makeAudioLevelObserver(room: Room, options: AudioLevelObse
 	}));
 
 	observer.on('silence', wrapper.event(room, null, () => {
-		console.log('silence');
+		// console.log('silence');
 
 		// Notify all Peers.
 		/* TODO : for (const peer of this._getJoinedPeers()) {

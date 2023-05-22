@@ -17,8 +17,10 @@ import { Logger } from './logs';
 import { makeAudioLevelObserver, makeConsumer, makeProducer, makeWebRtcTransport } from './rtc';
 import { io } from './server';
 import { Socket } from './types';
+import { query, sql } from './query';
 import wrapper from './wrapper';
 
+import { Channel } from '@app/types';
 import assert from 'assert';
 
 /** Type representing an rtc participant */
@@ -227,11 +229,16 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 		// Notify all other peers
 		if (participant.joined)
-			io().to(room.id).emit('participant-left', participant_id);
+			socket.to(room.id).emit('participant-left', participant_id);
 
 		// Iterate and close all transports (and any producers and consumers attached to them)
 		for (const transport of Object.values(participant.transports))
 			transport.close();
+			
+		// Remove participant from list in db
+		query(sql.update<Channel<'rtc'>>(room.id, {
+			set: { "data.participants": ['-=', participant_id] }
+		}));
 
 		// Remove participant from list
 		delete room.participants[participant_id];
@@ -262,37 +269,42 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Mark client as joined and ready
 		participant.joined = true;
 
-		// Acknowledge that client is joined
-		socket.emit('joined');
+		// Acknowledge that client is joined, while sending a list of already joined participants
+		const joined = getJoinedParticipants(room, participant_id);
+		socket.emit('joined', joined.map(x => x.id), () => {
+			// Create consumers for newly joined client for all other producer clients
+			const transport = Object.values(participant.transports).find(t => t.appData.type === 'consumer');
+			assert(transport, 'could not find a consumer transport');
+	
+			// Iterate all joined participants
+			for (const peer of joined) {
+				// Create consumer for each producer
+				for (const producer of Object.values(peer.producers)) {
+					makeConsumer({
+						room,
+						participant: {
+							consumer: participant,
+							producer: peer,
+						},
+						producer,
+						transport,
+					});
+				}
+	
+				// TODO : Add data consumers
+			}
+		});
 
 		// Logging
 		room.log.info(`participant successfully joined`, { data: { participant_id } });
 
-		// Create consumers for newly joined client for all other producer clients
-		const joined = getJoinedParticipants(room, participant_id);
-		const transport = Object.values(participant.transports).find(t => t.appData.type === 'consumer');
-		assert(transport, 'could not find a consumer transport');
-
-		// Iterate all joined participants
-		for (const peer of joined) {
-			// Create consumer for each producer
-			for (const producer of Object.values(peer.producers)) {
-				makeConsumer({
-					room,
-					participant: {
-						consumer: participant,
-						producer: peer,
-					},
-					producer,
-					transport,
-				});
-			}
-
-			// TODO : Add data consumers
-		}
-
 		// Notify all other clients of the newly joined client
-		io().to(room.id).emit('participant-joined', participant_id, device);
+		socket.to(room.id).emit('participant-joined', participant_id);
+
+		// Add to list of participants in db
+		query(sql.update<Channel<'rtc'>>(room.id, {
+			set: { "data.participants": ['+=', participant_id] }
+		}));
 	}));
 
 	// Called whenever a transport is used for the first time. It connects the server-side
