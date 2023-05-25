@@ -16,9 +16,11 @@ const config = {
     domains: dev_mode ? {
         api: 'http://localhost:3001',
         site: 'http://localhost:3000',
+        cors: ['http://localhost:3000'],
     } : {
         api: 'https://api.avidapp.io',
         site: 'https://avidapp.io',
+        cors: ['https://avidapp.io', 'https://www.avidapp.io'],
     },
     
 	/** Logger configuration */
@@ -69,7 +71,7 @@ const config = {
         // mediasoup WorkerSettings.
         // See https://mediasoup.org/documentation/v3/mediasoup/api/#WorkerSettings
         workerSettings: {
-            logLevel: 'debug',
+            logLevel: dev_mode ? 'debug' : 'error',
             logTags:
                 [
                     'info',
@@ -152,13 +154,11 @@ const config = {
                     protocol: 'udp',
                     ip: process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0',
                     announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP,
-                    port: 44444
                 },
                 {
                     protocol: 'tcp',
                     ip: process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0',
                     announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP,
-                    port: 44444
                 }
             ],
         } as WebRtcServerOptions,

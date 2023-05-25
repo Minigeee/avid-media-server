@@ -66,6 +66,8 @@ export type Room = {
 	};
 	/** A list of participants in the room */
 	participants: Record<string, Participant>;
+	/** A set of participant ids that are speaking */
+	speaking: Set<string>,
 };
 
 /** Type representing all rtc options a participant can use */
@@ -118,6 +120,7 @@ export async function getRoom(room_id: string, workers: Worker[], loads: number[
 			log: new Logger({}),
 			observers: {},
 			participants: {},
+			speaking: new Set<string>(),
 		};
 
 		// Create room properties that depend on other properties
@@ -125,9 +128,9 @@ export async function getRoom(room_id: string, workers: Worker[], loads: number[
 
 		// Make observers
 		const audioLevelObserver = await makeAudioLevelObserver(room, {
-			maxEntries: 1,
+			maxEntries: 5,
 			threshold: -80,
-			interval: 800
+			interval: 500
 		});
 
 		room.observers.audio_level = audioLevelObserver;
@@ -234,7 +237,7 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Iterate and close all transports (and any producers and consumers attached to them)
 		for (const transport of Object.values(participant.transports))
 			transport.close();
-			
+
 		// Remove participant from list in db
 		query(sql.update<Channel<'rtc'>>(room.id, {
 			set: { "data.participants": ['-=', participant_id] }
@@ -432,7 +435,7 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Close producer
 		producer.close();
 
-		// Remove from producer map
+		// Remove from producer maps
 		delete participant.producers[producer_id];
 
 		// Logging

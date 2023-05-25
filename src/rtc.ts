@@ -12,6 +12,7 @@ import {
 import config from './config';
 import { Participant, Room } from './rooms';
 import wrapper from './wrapper';
+import { io } from './server';
 
 type RtcTransportType = 'producer' | 'consumer';
 
@@ -243,15 +244,38 @@ export async function makeConsumer(options: {
 }
 
 
+/**
+ * Create an audio level observer for a room.
+ * 
+ * @param room The room to create an observer for
+ * @param options 
+ * @returns 
+ */
 export async function makeAudioLevelObserver(room: Room, options: AudioLevelObserverOptions) {
 	// Create observer
 	const observer = await room.router.createAudioLevelObserver(options);
 
 	// Attach event listeners
 	observer.on('volumes', wrapper.event(room, null, (volumes) => {
-		const { producer, volume } = volumes[0];
+		// Set of currently talking
+		const currSpeaking = new Set<string>(volumes.map((v: any) => v.producer.appData.participant_id));
+		
+		// Find the ones that started talking
+		const started = Array.from(currSpeaking).filter(x => !room.speaking.has(x));
+		// Find the ones that stopped talking
+		const stopped = Array.from(room.speaking).filter(x => !currSpeaking.has(x));
 
-		// console.log(`volume ${volume}`)
+		// Broadcast events
+		const _io = io();
+		for (const id of started)
+			_io.to(room.id).emit('participant-talk', id, 'start');
+		for (const id of stopped)
+			_io.to(room.id).emit('participant-talk', id, 'stop');
+
+		// Update sets
+		room.speaking = currSpeaking;
+
+		// console.log(`volume ${volumes[0].volume}`);
 
 		// Notify all Peers.
 		/* TODO : for (const peer of this._getJoinedPeers()) {
@@ -266,6 +290,14 @@ export async function makeAudioLevelObserver(room: Room, options: AudioLevelObse
 	}));
 
 	observer.on('silence', wrapper.event(room, null, () => {
+		// Broadcast stop events
+		const _io = io();
+		for (const id of Array.from(room.speaking))
+			_io.to(room.id).emit('participant-talk', id, 'stop');
+
+		// Update sets
+		room.speaking = new Set<string>();
+
 		// console.log('silence');
 
 		// Notify all Peers.

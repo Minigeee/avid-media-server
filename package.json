@@ -2,12 +2,13 @@
   "name": "media-server",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/media-server/src/server.js",
+  "main": "dist/src/server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "npx nodemon ./src/server.ts",
     "build": "shx rm -rf dist && tsc",
-    "start": "node dist/media-server/src/server.js"
+    "docker": "shx mkdir app && shx cp -r ../client/src/lib/types ./app && docker build . -t avid-app-rtc && shx rm -rf app",
+    "start": "node dist/src/server.js"
   },
   "author": "",
   "license": "ISC",
