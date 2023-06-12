@@ -14,8 +14,9 @@ import config from './config';
 import { log } from './logs';
 import { addParticipant, getRoom } from './rooms';
 
-import { Media_ClientToServerEvents, Media_ServerToClientEvents } from '@app/types';
+import { AclEntry, AllPermissions, Media_ClientToServerEvents, Media_ServerToClientEvents, Member } from '@app/types';
 import { getJwtPublic } from './keys';
+import { query, sql } from './query';
 
 
 const _workers: Worker[] = [];
@@ -139,13 +140,52 @@ async function makeSocketServer() {
         const profile_id = user.profile_id;
         const room_id = socket.handshake.query.room_id as string;
 
-        // TODO : Check if user has permissions
+        // Get user permissions
+        const results = await query<[unknown, AclEntry[], Member]>(sql.multi([
+            sql.let('$member', sql.wrap(sql.select<Member>(['roles', 'is_admin'], {
+                from: `${room_id}.domain<-member_of`,
+                where: sql.match({ in: profile_id }),
+            }), { append: '[0]' })),
+            sql.select<AclEntry>('*', {
+                from: 'acl',
+                where: sql.match<AclEntry>({
+                    resource: room_id,
+                    role: ['IN', sql.$('$member.roles')],
+                }),
+            }),
+            'RETURN $member',
+        ]), { complete: true });
+
+        // Check if user can join
+        let canJoin = results !== null;
+        const permissions = new Set<AllPermissions>();
+        if (results && canJoin) {
+            // Create permissions set
+            for (const entry of results[1]) {
+                for (const p of entry.permissions)
+                    permissions.add(p);
+            }
+
+            // Check for view permission
+            canJoin = results[2].is_admin || permissions.has('can_view');
+        }
+
+        // Quit if can't join
+        if (!canJoin) {
+            log.warn('not authorized');
+            socket.emit('error', 'not authorized', 403);
+            socket.disconnect();
+            return;
+        }
 
         // Get room
         const room = await getRoom(room_id, _workers, _workerLoads);
 
         // Add participant to requested room
-        await addParticipant(room, profile_id, socket);
+        await addParticipant(room, profile_id, socket, {
+            is_admin: results?.[2].is_admin,
+            permissions: permissions,
+        });
 	});
 }
 

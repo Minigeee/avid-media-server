@@ -217,7 +217,7 @@ export const sql = {
 	/** Match a set of expressions and join them with "and" or "or", where each object key and value are being compared for equality.
 	 * Other boolean operators can be used if object values are arrays, where [0] is the operator and [1] is the second operand */
 	match: <T extends object>(conds: { [K in keyof T]?: SqlType | SqlContent<T[K]> | [SqlOp, SqlType] }, join: '&&' | '||' = '&&') =>
-		Object.entries(conds).map(([k, v]) => !Array.isArray(v) ? `${k}=${_json(v)}` : `${k}${v[0]}${_json(v[1])}`).join(join) + ' ',
+		Object.entries(conds).map(([k, v]) => !Array.isArray(v) ? `${k}=${_json(v)}` : `${k} ${v[0]} ${_json(v[1])}`).join(join) + ' ',
 
 	/** Chain multiple statements */
 	multi: (statements: string[]) => statements.map(x => x.trim()).join('; ') + ' ',

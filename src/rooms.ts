@@ -20,7 +20,7 @@ import { Socket } from './types';
 import { query, sql } from './query';
 import wrapper from './wrapper';
 
-import { Channel } from '@app/types';
+import { AllPermissions, Channel } from '@app/types';
 import assert from 'assert';
 
 /** Type representing an rtc participant */
@@ -46,6 +46,11 @@ export type Participant = {
 		/** Sctp capabilities */
 		sctp?: SctpCapabilities;
 	};
+	
+	/** Indicates if participant is a domain admin */
+	is_admin: boolean | undefined;
+	/** Participant's permissions */
+	permissions: Set<AllPermissions>;
 };
 
 /** Type representing an rtc room */
@@ -71,14 +76,18 @@ export type Room = {
 };
 
 /** Type representing all rtc options a participant can use */
-type ParticpantOptions = Partial<{
+type ParticpantOptions = {
+	/** Indicates if participant is a domain admin */
+	is_admin: boolean | undefined;
+	/** Participant's permissions */
+	permissions: Set<AllPermissions>;
 	/** Indicates if tcp should be forced */
-	forceTcp: boolean;
+	forceTcp?: boolean;
 	/** Indicates if user will be a producer */
-	producer: boolean;
+	producer?: boolean;
 	/** Indicates if user will be a consumer */
-	consumer: boolean;
-}>;
+	consumer?: boolean;
+};
 
 
 /** All rooms in server */
@@ -179,7 +188,7 @@ export async function closeRoom(room_id: string) {
  * @param socket The socket associated with the participant
  * @param options Options for the participant
  */
-export async function addParticipant(room: Room, participant_id: string, socket: Socket, options?: ParticpantOptions) {
+export async function addParticipant(room: Room, participant_id: string, socket: Socket, options: ParticpantOptions) {
 	// Check if participant already added
 	if (room.participants[participant_id]) return;
 
@@ -193,14 +202,17 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		producers: {},
 		consumers: {},
 		capabilities: {},
+
+		is_admin: options.is_admin,
+		permissions: options.permissions,
 	};
 
 	// Add room to socket.io room
 	socket.join(room.id);
 
-	// Create producer transport
+	// Create producer transport (if a producer and has permission to do either audio or video)
 	let producerConfig;
-	if (options?.producer === false ? false : true) {
+	if (options?.producer === false ? false : (options.is_admin || options.permissions.has('can_speak') || options.permissions.has('can_share_video'))) {
 		const transport = await makeWebRtcTransport(room, participant_id, 'producer', options?.forceTcp);
 
 		producerConfig = {
@@ -328,10 +340,18 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 	socket.on('produce', wrapper.event(room, participant_id, async (
 		transport_id: string,
 		{ kind, rtpParameters, appData },
-		callback: (producer_id: string) => void
+		callback: (producer_id: string | null) => void
 	) => {
 		const participant = room.participants[participant_id];
 		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// Deny producer creation if do not have permission
+		if (!participant.is_admin) {
+			if ((kind === 'audio' && !participant.permissions.has('can_speak')) || (kind === 'video' && !participant.permissions.has('can_share_video'))) {
+				callback(null);
+				return;
+			}
+		}
 
 		// Get transport
 		const transport = participant.transports[transport_id];
