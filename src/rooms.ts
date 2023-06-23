@@ -212,7 +212,7 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 	// Create producer transport (if a producer and has permission to do either audio or video)
 	let producerConfig;
-	if (options?.producer === false ? false : (options.is_admin || options.permissions.has('can_speak') || options.permissions.has('can_share_video'))) {
+	if (options?.producer === false ? false : (options.is_admin || options.permissions.has('can_broadcast_audio') || options.permissions.has('can_broadcast_video'))) {
 		const transport = await makeWebRtcTransport(room, participant_id, 'producer', options?.forceTcp);
 
 		producerConfig = {
@@ -347,7 +347,7 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 		// Deny producer creation if do not have permission
 		if (!participant.is_admin) {
-			if ((kind === 'audio' && !participant.permissions.has('can_speak')) || (kind === 'video' && !participant.permissions.has('can_share_video'))) {
+			if ((kind === 'audio' && !participant.permissions.has('can_broadcast_audio')) || (kind === 'video' && !participant.permissions.has('can_broadcast_video'))) {
 				callback(null);
 				return;
 			}
