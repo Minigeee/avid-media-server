@@ -141,15 +141,16 @@ async function makeSocketServer() {
         const room_id = socket.handshake.query.room_id as string;
 
         // Get user permissions
-        const results = await query<[unknown, AclEntry[], Member]>(sql.multi([
+        const results = await query<[unknown, unknown, AclEntry[], Member]>(sql.multi([
             sql.let('$member', sql.wrap(sql.select<Member>(['roles', 'is_admin'], {
                 from: `${room_id}.domain<-member_of`,
                 where: sql.match({ in: profile_id }),
             }), { append: '[0]' })),
+            sql.let('$resource', `${room_id}.inherit || ${room_id}`),
             sql.select<AclEntry>('*', {
                 from: 'acl',
                 where: sql.match<AclEntry>({
-                    resource: room_id,
+                    resource: sql.$('$resource'),
                     role: ['IN', sql.$('$member.roles')],
                 }),
             }),
@@ -161,13 +162,13 @@ async function makeSocketServer() {
         const permissions = new Set<AllPermissions>();
         if (results && canJoin) {
             // Create permissions set
-            for (const entry of results[1]) {
+            for (const entry of results[2]) {
                 for (const p of entry.permissions)
                     permissions.add(p);
             }
 
             // Check for view permission
-            canJoin = results[2].is_admin || permissions.has('can_view');
+            canJoin = results[3].is_admin || permissions.has('can_view');
         }
 
         // Quit if can't join
@@ -183,7 +184,7 @@ async function makeSocketServer() {
 
         // Add participant to requested room
         await addParticipant(room, profile_id, socket, {
-            is_admin: results?.[2].is_admin,
+            is_admin: results?.[3].is_admin,
             permissions: permissions,
         });
 	});
