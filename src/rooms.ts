@@ -23,6 +23,14 @@ import wrapper from './wrapper';
 import { AllPermissions, Channel } from '@app/types';
 import assert from 'assert';
 
+/** Producer app data */
+export type ProducerAppData = {
+	/** The participant the producer is associated with */
+	participant_id: string;
+	/** Indicates if this producer is for screen share */
+	share?: boolean;
+};
+
 /** Type representing an rtc participant */
 export type Participant = {
 	/** Participant id */
@@ -51,6 +59,17 @@ export type Participant = {
 	is_admin: boolean | undefined;
 	/** Participant's permissions */
 	permissions: Set<AllPermissions>;
+	/** Indicates if audio consumers are deafened (paused) */
+	is_deafened: boolean;
+	/** Locked producer types */
+	locked: {
+		/** Is audio locked */
+		audio?: boolean;
+		/** Is video locked */
+		video?: boolean;
+		/** Is share locked */
+		share?: boolean;
+	};
 };
 
 /** Type representing an rtc room */
@@ -92,6 +111,12 @@ type ParticpantOptions = {
 
 /** All rooms in server */
 const _rooms: Record<string, Room> = {};
+
+
+/** Get media type from kind and app data */
+function getMediaType(kind: 'audio' | 'video', appData: ProducerAppData) {
+	return kind === 'audio' ? 'audio' : appData.share ? 'share' : 'video';
+}
 
 
 /**
@@ -171,6 +196,12 @@ export async function closeRoom(room_id: string) {
 	// Close router
 	room.router.close();
 
+	// Remove participants from database
+	/* query(sql.update<Channel>(room_id, {
+		set: { 'data.participants': [] },
+		return: 'NONE',
+	})); */
+
 	// Logging
 	room.log.info(`closed room`);
 
@@ -205,6 +236,8 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 		is_admin: options.is_admin,
 		permissions: options.permissions,
+		is_deafened: false,
+		locked: {},
 	};
 
 	// Add room to socket.io room
@@ -273,48 +306,64 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 	// are saved so server can connect producer -> consumer correctly and deny any invalid
 	// connections, based on each client's capabilities. By the end of this function, the client
 	// is fully joined, and a consumer is created for each producer within the room.
-	socket.on('config', wrapper.event(room, participant_id, (device, rtpCapabilities: RtpCapabilities, sctpCapabilities: SctpCapabilities) => {
+	socket.on('config', wrapper.event(room, participant_id, (device, rtpCapabilities: RtpCapabilities, sctpCapabilities: SctpCapabilities, is_deafened: boolean) => {
 		const participant = room.participants[participant_id];
 
 		// Save client config
 		participant.device = device;
 		participant.capabilities.rtp = rtpCapabilities;
 		participant.capabilities.sctp = sctpCapabilities;
+		participant.is_deafened = is_deafened;
 
 		// Mark client as joined and ready
 		participant.joined = true;
 
 		// Acknowledge that client is joined, while sending a list of already joined participants
 		const joined = getJoinedParticipants(room, participant_id);
-		socket.emit('joined', joined.map(x => x.id), () => {
-			// Create consumers for newly joined client for all other producer clients
-			const transport = Object.values(participant.transports).find(t => t.appData.type === 'consumer');
-			assert(transport, 'could not find a consumer transport');
-	
-			// Iterate all joined participants
-			for (const peer of joined) {
-				// Create consumer for each producer
-				for (const producer of Object.values(peer.producers)) {
-					makeConsumer({
-						room,
-						participant: {
-							consumer: participant,
-							producer: peer,
-						},
-						producer,
-						transport,
-					});
+		socket.emit(
+			'joined',
+			joined.map(x => ({
+				id: x.id,
+				is_admin: x.is_admin || false,
+				is_manager: x.permissions.has('can_manage_participants'),
+				is_deafened: x.is_deafened,
+			})),
+			() => {
+				// Create consumers for newly joined client for all other producer clients
+				const transport = Object.values(participant.transports).find(t => t.appData.type === 'consumer');
+				assert(transport, 'could not find a consumer transport');
+
+				// Iterate all joined participants
+				for (const peer of joined) {
+					// Create consumer for each producer
+					for (const producer of Object.values(peer.producers)) {
+						makeConsumer({
+							room,
+							participant: {
+								consumer: participant,
+								producer: peer,
+							},
+							producer,
+							transport,
+						});
+					}
+
+					// TODO : Add data consumers
 				}
-	
-				// TODO : Add data consumers
 			}
-		});
+		);
 
 		// Logging
 		room.log.info(`participant successfully joined`, { data: { participant_id } });
 
 		// Notify all other clients of the newly joined client
-		socket.to(room.id).emit('participant-joined', participant_id);
+		socket.to(room.id).emit(
+			'participant-joined',
+			participant_id,
+			participant.is_admin || false,
+			participant.permissions.has('can_manage_participants'),
+			participant.is_deafened
+		);
 
 		// Add to list of participants in db
 		query(sql.update<Channel<'rtc'>>(room.id, {
@@ -348,6 +397,13 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		// Deny producer creation if do not have permission
 		if (!participant.is_admin) {
 			if ((kind === 'audio' && !participant.permissions.has('can_broadcast_audio')) || (kind === 'video' && !participant.permissions.has('can_broadcast_video'))) {
+				callback(null);
+				return;
+			}
+
+			// Quit if producer is locked
+			const type = getMediaType(kind, appData);
+			if (participant.locked[type]) {
 				callback(null);
 				return;
 			}
@@ -471,7 +527,12 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		const producer = participant.producers[producer_id];
 		assert(producer, `producer with id "${producer_id}" does not exist`);
 
-		// Pause producer
+		// Quit if producer is locked
+		const type = getMediaType(producer.kind, producer.appData as any);
+		if (participant.locked[type])
+			return;
+
+		// Pause producer if not locked
 		await producer.pause();
 
 		// Logging
@@ -487,11 +548,100 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 		const producer = participant.producers[producer_id];
 		assert(producer, `producer with id "${producer_id}" does not exist`);
 
+		// Quit if producer is locked
+		const type = getMediaType(producer.kind, producer.appData as any);
+		if (participant.locked[type])
+			return;
+
 		// Resume producer
 		await producer.resume();
 
 		// Logging
 		room.log.verbose('producer resumed/unmuted', { data: { participant_id, producer_id } });
+	}));
+
+
+	// User actions
+
+	// Deafen
+	socket.on('deafen', wrapper.event(room, participant_id, async () => {
+		const participant = room.participants[participant_id];
+		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// Only change deafen state, all consumer pauses are handled on client side
+		participant.is_deafened = true;
+		
+		socket.to(room.id).emit('participant-deafened', participant_id);
+	}));
+
+	// Undeafen
+	socket.on('undeafen', wrapper.event(room, participant_id, async () => {
+		const participant = room.participants[participant_id];
+		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// Only change deafen state, all consumer resumes are handled on client side
+		participant.is_deafened = false;
+		
+		socket.to(room.id).emit('participant-undeafened', participant_id);
+	}));
+
+	// Lock producer of another participant
+	socket.on('lock-producer', wrapper.event(room, participant_id, async (other_id: string, type: 'audio' | 'video' | 'share') => {
+		const self = room.participants[participant_id];
+		const participant = room.participants[other_id];
+
+		assert(self?.joined, 'sender participant does not exist or is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// The sender must be manager, and other participant must not be a manager
+		if (participant.is_admin || !self.is_admin && (!self.permissions.has('can_manage_participants') || participant.permissions.has('can_manage_participants')))
+			return;
+		
+		// Pause/close all producers
+		for (const producer of Object.values(participant.producers)) {
+			const ptype = getMediaType(producer.kind, producer.appData as any);
+			if (ptype !== type) continue;
+
+			if (type === 'audio') {
+				// Pause audio
+				if (!producer.paused)
+					await producer.pause();
+			}
+			else {
+				// Close video
+				producer.close();
+
+				// Remove from producer maps
+				delete participant.producers[producer.id];
+			}
+		}
+
+		// Lock producer type
+		participant.locked[type] = true;
+		socket.to(room.id).emit('producer-locked', other_id, type);
+
+		// Logging
+		room.log.verbose('producer locked', { data: { participant_id: other_id, type } });
+	}));
+	
+	// Unlock producer of another participant
+	socket.on('unlock-producer', wrapper.event(room, participant_id, async (other_id: string, type: 'audio' | 'video' | 'share') => {
+		const self = room.participants[participant_id];
+		const participant = room.participants[other_id];
+
+		assert(self?.joined, 'sender participant does not exist or is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// The sender must be manager, and other participant must not be a manager
+		if (participant.is_admin || !self.is_admin && (!self.permissions.has('can_manage_participants') || participant.permissions.has('can_manage_participants')))
+			return;
+
+		// Unlock producer type
+		participant.locked[type] = false;
+		socket.to(room.id).emit('producer-unlocked', other_id, type);
+
+		// Logging
+		room.log.verbose('producer unlocked', { data: { participant_id: other_id, type } });
 	}));
 
 

@@ -226,7 +226,7 @@ export async function makeConsumer(options: {
 		kind: consumer.kind,
 		rtpParameters: consumer.rtpParameters,
 		type: consumer.type,
-		appData: producer.appData,
+		appData: { ...producer.appData, is_deafened: participant.consumer.is_deafened },
 		producerPaused: consumer.producerPaused
 	}, wrapper.event(room, participant.consumer.id, async (success) => {
 		if (!success)
@@ -236,7 +236,8 @@ export async function makeConsumer(options: {
 		// the Consumer so the remote endpoint will receive the a first RTP packet
 		// of this new stream once its PeerConnection is already ready to process
 		// and associate it.
-		await consumer.resume();
+		if (consumer.kind !== 'audio' || !participant.consumer.is_deafened)
+			await consumer.resume();
 
 		// Notify initial score
 		participant.consumer.socket.emit('consumer-score', consumer.id, consumer.score);
