@@ -182,6 +182,13 @@ async function makeSocketServer() {
         // Get room
         const room = await getRoom(room_id, _workers, _workerLoads);
 
+        // Check if the user has been kicked
+        if (room.kicked.has(profile_id)) {
+            socket.emit('error', 'you have been kicked from this room and are not allowed to join until this session is over', 403);
+            socket.disconnect();
+            return;
+        }
+
         // Add participant to requested room
         await addParticipant(room, profile_id, socket, {
             is_admin: results?.[3].is_admin,

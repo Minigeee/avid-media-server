@@ -91,7 +91,9 @@ export type Room = {
 	/** A list of participants in the room */
 	participants: Record<string, Participant>;
 	/** A set of participant ids that are speaking */
-	speaking: Set<string>,
+	speaking: Set<string>;
+	/** Set of users that have been kicked so that they aren't allowed back in */
+	kicked: Set<string>;
 };
 
 /** Type representing all rtc options a participant can use */
@@ -155,6 +157,7 @@ export async function getRoom(room_id: string, workers: Worker[], loads: number[
 			observers: {},
 			participants: {},
 			speaking: new Set<string>(),
+			kicked: new Set<string>(),
 		};
 
 		// Create room properties that depend on other properties
@@ -197,10 +200,10 @@ export async function closeRoom(room_id: string) {
 	room.router.close();
 
 	// Remove participants from database
-	/* query(sql.update<Channel>(room_id, {
+	query(sql.update<Channel>(room_id, {
 		set: { 'data.participants': [] },
 		return: 'NONE',
-	})); */
+	}));
 
 	// Logging
 	room.log.info(`closed room`);
@@ -562,6 +565,49 @@ export async function addParticipant(room: Room, participant_id: string, socket:
 
 
 	// User actions
+
+	// Kick participant
+	socket.on('kick', wrapper.event(room, participant_id, async (other_id: string) => {
+		const self = room.participants[participant_id];
+		const participant = room.participants[other_id];
+
+		assert(self?.joined, 'sender participant does not exist or is not joined');
+		assert(participant?.joined, 'participant does not exist or is not joined');
+
+		// The sender must be manager, and other participant must not be a manager
+		if (participant.is_admin || !self.is_admin && (!self.permissions.has('can_manage_participants') || participant.permissions.has('can_manage_participants')))
+			return;
+
+		// Add the participant's id to set
+		room.kicked.add(other_id);
+
+		// Kick user
+		participant.socket.emit('kicked');
+
+		// Remove user
+		{
+			// Disconnect user
+			participant.socket.disconnect();
+
+			// Iterate and close all transports (and any producers and consumers attached to them)
+			for (const transport of Object.values(participant.transports))
+				transport.close();
+
+			// Remove participant from list in db
+			query(sql.update<Channel<'rtc'>>(room.id, {
+				set: { "data.participants": ['-=', other_id] }
+			}));
+
+			// Remove participant from list
+			delete room.participants[other_id];
+		}
+
+		// Notify others that user left
+		socket.to(room.id).emit('participant-left', other_id);
+
+		// Logging
+		room.log.info(`kicked participant`, { data: { participant_id: other_id } });
+	}));
 
 	// Deafen
 	socket.on('deafen', wrapper.event(room, participant_id, async () => {
